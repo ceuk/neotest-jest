@@ -1,5 +1,6 @@
 ---@diagnostic disable: undefined-field
 local lib = require('neotest.lib')
+local async = require("neotest.async")
 local logger = require('neotest.logging')
 
 ---@type neotest.Adapter
@@ -119,14 +120,14 @@ end
 
 local function parsed_json_to_results(data, output_file)
   local tests = {}
-  local failed = false
+  local error = false
 
   local testFn = data.testResults[1].name
   for _, result in pairs(data.testResults[1].assertionResults) do
     local status, name = result.status, result.title
     if name == nil then
       logger.error('Failed to find parsed test result ', result)
-      return {}, failed
+      return {}, true
     end
     local keyid = testFn
     for _, value in ipairs(result.ancestorTitles) do
@@ -136,14 +137,16 @@ local function parsed_json_to_results(data, output_file)
     if status == 'pending' then
       status = 'skipped'
     end
+    local test_output_path = async.fn.tempname()
+    local test_output_file = assert(io.open(test_output_path, "w"))
     tests[keyid] = {
       status = status,
       short = name .. ': ' .. status,
-      output = output_file,
+      output = test_output_path,
       location = result.location,
     }
-    if result.failureMessages then
-      failed = true
+    if result.failureMessages and next(result.failureMessages) ~= nil then
+      result.status = 'failed'
       local errors = {}
       for i, failMessage in ipairs(result.failureMessages) do
         local msg = cleanAnsi(failMessage)
@@ -152,11 +155,15 @@ local function parsed_json_to_results(data, output_file)
           message = msg,
         }
         tests[keyid].short = tests[keyid].short .. '\n' .. msg
+        test_output_file:write(failMessage)
       end
       tests[keyid].errors = errors
+    else
+      test_output_file:write(' \27[1;32m✔ \27[0m ' .. name)
     end
+    test_output_file:close()
   end
-  return tests, failed
+  return tests, error
 end
 
 ---@async
@@ -177,17 +184,14 @@ function adapter.results(spec, _, tree)
     return {}
   end
 
-  local results, failed = parsed_json_to_results(parsed, output_file)
+  local results, error = parsed_json_to_results(parsed, output_file)
   for _, value in tree:iter() do
-    if value.type ~= 'file' or value.type ~= 'namespace' then
-      logger.error('Failed to find test result ', value)
-      return results
+    value.id = value.id:gsub("'", '"')
+    results[value.id] = results[value.id] or value
+    if results[value.id].status == nil then
+      results[value.id].status = 'passed'
     end
-    results[value.id] = {
-      status = 'passed',
-      output = output_file,
-    }
-    if failed then
+    if error then
       results[value.id].status = 'failed'
     end
   end
